@@ -1,4 +1,4 @@
-from django.shortcuts import render
+
 from django.http import HttpResponse
 from django.contrib import messages
 from django.shortcuts import redirect
@@ -7,6 +7,7 @@ from .models import Product
 from django.template.loader import render_to_string
 from django.db.models import Avg, Count
 from core.models import ProductReview
+from django.db.models import Avg
 from django.shortcuts import get_object_or_404
 from core.models import *
 from core.models import Image
@@ -17,18 +18,23 @@ from core.models import Category
 import core.constants as C
 from core.constants import TAG_LIMIT
 from core.models import Coupon, Product, Category, Vendor, CartOrder, CartOrderProducts, Image, ProductReview, Address
-# Create your views here.
 from taggit.models import Tag
 from core.constants import *
 from django.contrib.auth.decorators import login_required
-from decimal import Decimal
-from django.shortcuts import render
+from decimal import Decimal, ROUND_HALF_UP
 from .models import Product, Image
 from core.forms import ProductReviewForm
 from django.utils import timezone
 from django.utils.translation import gettext as _
 from django.db import transaction
 from django.templatetags.static import static
+from django.urls import reverse
+from django.conf import settings
+from django.views.decorators.csrf import csrf_exempt
+from paypal.standard.forms import PayPalPaymentsForm
+from django.views.decorators.http import require_POST
+from django.shortcuts import render, redirect, get_object_or_404
+
 
 def index(request):
     # Base query: các sản phẩm đã publish
@@ -77,11 +83,17 @@ def cart_view(request):
     cart_total_amount = 0
     cart_items = {}
     if 'cart_data_obj' in request.session:
+        updated_cart_data = {}
+
         for p_id, item in request.session['cart_data_obj'].items():
             try:
-                price = float(item.get('price', 0) or 0)
+                product = Product.objects.get(pid=p_id)
+                price = float(item.get('price', product.amount) or 0)
                 qty = int(item.get('qty', 1))
                 subtotal = qty * price
+            except Product.DoesNotExist:
+                messages.warning(request, _("Product with ID %(pid)s is no longer available.") % {"pid": p_id})
+                continue
             except (ValueError, TypeError):
                 price = 0
                 qty = 0
@@ -89,17 +101,26 @@ def cart_view(request):
 
             item['subtotal'] = subtotal
             cart_items[p_id] = item
+            updated_cart_data[p_id] = item
             cart_total_amount += subtotal
+
+        # Cập nhật lại session giỏ hàng
+        request.session['cart_data_obj'] = updated_cart_data
+
+        # Nếu giỏ rỗng sau khi lọc -> return luôn, tránh StopIteration
+        if not cart_items:
+            messages.warning(request, _("Your cart is empty"))
+            return redirect("core:index")
+
+        # Lấy vendor từ sản phẩm đầu tiên
         first_product_id = next(iter(cart_items))
-        try:
-          product = Product.objects.get(pid=first_product_id)
-          vendor = product.vendor
-        except Product.DoesNotExist:
-          messages.warning(request, _("One or more products are no longer available."))
-          return redirect("core:index")
+        product = Product.objects.get(pid=first_product_id)
+        vendor = product.vendor
+
+        # Tạo hoặc cập nhật đơn hàng
         order, created = CartOrder.objects.get_or_create(
             user=request.user,
-            paid_status=False,
+            order_status='pending',
             defaults={
                 "vendor": vendor,
                 "amount": Decimal(cart_total_amount)
@@ -115,9 +136,10 @@ def cart_view(request):
             'cart_total_amount': cart_total_amount,
             'order': order
         })
-    else:
-        messages.warning(request, _("Your cart is empty"))
-        return redirect("core:index")
+
+    messages.warning(request, _("Your cart is empty"))
+    return redirect("core:index")
+
 
 def add_to_cart(request):
     cart_product = {}
@@ -163,24 +185,40 @@ def delete_item_from_cart(request):
     context = render_to_string("core/async/cart-table.html", {"cart_data":request.session['cart_data_obj'], 'totalcartitems': len(request.session['cart_data_obj']), 'cart_total_amount':cart_total_amount})
     return JsonResponse({"data": context, 'totalcartitems': len(request.session['cart_data_obj'])})
 
+
 @login_required
 def update_cart(request):
-    product_id = str(request.GET['id'])
-    product_qty = request.GET['qty']
+    product_id = str(request.GET.get("id"))
+    product_qty = int(request.GET.get("qty", 1))
 
-    if 'cart_data_obj' in request.session:
-        if product_id in request.session['cart_data_obj']:
-            cart_data = request.session['cart_data_obj']
-            cart_data[str(request.GET['id'])]['qty'] = product_qty
-            request.session['cart_data_obj'] = cart_data
+    cart = request.session.get("cart_data_obj", {})
+    try:
+        product = Product.objects.get(pid=product_id)
+    except Product.DoesNotExist:
+        return JsonResponse({"success": False, "error": "Product not found"})
+    message = None
+    if product_qty < 1:
+        product_qty = 1
+        message = "Số lượng tối thiểu là 1."
+    elif product_qty > product.stock_count:
+        product_qty = product.stock_count
+        message = f"Chỉ còn {product.stock_count} sản phẩm trong kho."
+    if product_id in cart:
+        price = float(cart[product_id]["price"])
+        cart[product_id]["qty"] = product_qty
+        cart[product_id]["subtotal"] = product_qty * price
+        request.session["cart_data_obj"] = cart
 
-    cart_total_amount = 0
-    if 'cart_data_obj' in request.session:
-        for p_id, item in request.session['cart_data_obj'].items():
-            cart_total_amount += int(item['qty']) * float(item['price'])
+    cart_total_amount = sum(float(item["subtotal"]) for item in cart.values())
 
-    context = render_to_string("core/async/cart-table.html", {"cart_data":request.session['cart_data_obj'], 'totalcartitems': len(request.session['cart_data_obj']), 'cart_total_amount':cart_total_amount})
-    return JsonResponse({"data": context, 'totalcartitems': len(request.session['cart_data_obj'])})
+    return JsonResponse({
+        "success": True,
+        "subtotal": cart[product_id]["subtotal"],
+        "cart_total": cart_total_amount,
+        "qty": cart[product_id]["qty"],
+        "stock": product.stock_count,
+        "message": message,
+    })
 
 @login_required
 def ajax_add_review(request, pid):
@@ -292,7 +330,8 @@ def checkout(request, oid):
       shipping = Decimal('0')
       discount = Decimal('0')
       total = subtotal
-
+      order.amount = total
+      order.save()
       # Xử lý áp dụng coupon
       if request.method == "POST" and "apply_coupon" in request.POST:
           code = request.POST.get("code", "").strip()
@@ -309,6 +348,20 @@ def checkout(request, oid):
           if discount > coupon.max_discount_amount:
               discount = coupon.max_discount_amount
           total = subtotal - discount + tax + shipping
+          order.amount = total
+          order.save()
+    host = request.get_host()
+    paypal_dict = {
+        'business': settings.PAYPAL_RECEIVER_EMAIL,
+        'amount': subtotal,
+        'item_name': "Order-Item-No-" + str(order.id),
+        'invoice': "INVOICE_NO-3",
+        'currency_code': "USD",
+        'notify_url': 'http://{}/{}'.format(host, reverse("core:paypal-ipn")),
+        'return_url': 'http://{}/{}'.format(host, reverse("core:payment-completed")),
+        'cancel_url': 'http://{}/{}'.format(host, reverse("core:payment-failed")),
+    }
+    paypal_payment_button = PayPalPaymentsForm(initial=paypal_dict)
 
     context = {
       "order": order,
@@ -318,14 +371,23 @@ def checkout(request, oid):
       "shipping": shipping,
       "discount": discount,
       "total": total,
+      "payment_button_form": paypal_payment_button,
     }
     return render(request, "core/checkout.html", context)
 
-def payment_completed_view(request):
+@login_required
+def payment_completed_view(request, oid):
+    order = CartOrder.objects.get(oid=oid)
+
+    if order.paid_status == False:
+        order.paid_status = True
+        order.order_status = 'processing'
+        order.save()
+
     context = {
-        "order": get_sample_order(),
+        "order": order,
     }
-    return render(request, 'core/payment-completed.html', context)
+    return render(request, 'core/payment-completed.html',  context)
 
 def payment_failed_view(request):
     return render(request, 'core/payment-failed.html')
@@ -393,7 +455,6 @@ def product_detail_view(request, pid):
     for r in reviews:
         width = r.rating * 20
         reviews_with_width.append((r, width))
-
     # average review
     average_rating = ProductReview.objects.filter(product=product).aggregate(rating=Avg('rating'))
     rating_counts = get_rating_counts(product)
@@ -471,7 +532,6 @@ def vendor_list_view(request):
     # Apply pagination
     paginator = Paginator(vendors, 12)  # Show 12 vendors per page
     page_obj = paginator.get_page(page_number)
-
     context = {
         "vendors": page_obj,
         "sort_by": sort_by,
@@ -568,3 +628,101 @@ def get_rating_counts(product):
         })
     return results
 
+
+
+@require_POST
+@login_required
+def cod_checkout(request):
+    """
+    Người dùng chọn COD:
+    - Giữ amount đã tính sẵn trong order
+    - Đặt order_status='shipped'
+    - paid_status=False (chưa thu tiền)
+    - Xoá giỏ trong session
+    - Điều hướng sang trang chi tiết COD
+    """
+    oid = request.POST.get("oid")
+    order = get_object_or_404(CartOrder, id=oid, user=request.user)
+
+    # Đảm bảo có item
+    if not order.order_products.exists():
+        messages.error(request, _("Your cart is empty or order has no items."))
+        return redirect("core:cart")
+
+    # Nếu vì lý do gì đó amount chưa set, tính lại nhanh từ dòng hàng
+    if not order.amount or order.amount <= 0:
+        amt = order.order_products.aggregate(total=Sum('total'))['total'] or Decimal("0")
+        order.amount = amt.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    for item in order.order_products.all():
+      try:
+          # Map từ tên sản phẩm (item) sang Product
+        product = Product.objects.get(title=item.item)
+      except Product.DoesNotExist:
+        continue  # bỏ qua nếu không tìm thấy
+
+      if product.stock_count is not None:
+          # stock_count nên là IntegerField, không phải CharField
+          current_stock = int(product.stock_count or 0)
+          new_stock = max(0, current_stock - item.qty)
+          product.stock_count = new_stock
+          if new_stock == 0:
+              product.in_stock = False
+              product.product_status = 'draft'
+          product.save(update_fields=["stock_count", "in_stock",'product_status'])
+
+    # Cập nhật trạng thái COD theo yêu cầu
+    order.paid_status = False
+    order.order_status = 'shipped'   # <-- theo yêu cầu
+    order.save(update_fields=["amount", "paid_status", "order_status"])
+
+    # Xoá giỏ + dấu băng nếu có
+    request.session['cart_data_obj'] = {}
+    request.session.pop('frozen_order_id', None)
+    request.session.modified = True
+
+    return redirect("core:cod-detail", oid=order.id)
+
+
+@login_required
+def cod_detail(request, oid):
+    """
+    Màn hình chi tiết đơn COD (hoá đơn rút gọn) + nút Accept
+    """
+    order = get_object_or_404(CartOrder, id=oid, user=request.user)
+    items = order.order_products.all()
+    order_items = CartOrderProducts.objects.filter(order=order)
+    subtotal = sum([i.total for i in order_items])
+    discount = Decimal('0.00')
+    if order.coupon:
+      coupon = order.coupon
+      discount = subtotal * Decimal(str(coupon.discount)) / Decimal('100')
+      if discount > coupon.max_discount_amount:
+        discount = coupon.max_discount_amount
+    return render(request, "core/cod_detail.html", {
+        "order": order,
+        "order_items": items,
+        "discount": discount,
+    })
+
+
+@require_POST
+@login_required
+def cod_accept(request, oid):
+    """
+    Người dùng xác nhận đã nhận hàng (Accept):
+    - Đánh dấu order_status='completed'
+    - Tuỳ yêu cầu nghiệp vụ: coi như đã thu tiền -> paid_status=True
+    """
+    order = get_object_or_404(CartOrder, id=oid, user=request.user)
+
+    order.order_status = 'processing'
+    order.paid_status = False
+    order.save(update_fields=["order_status", "paid_status"])
+
+    messages.success(request, _("Thanks! Your COD order is completed."))
+    # Điều hướng đến trang lịch sử đơn hàng (đổi route cho phù hợp dự án của bạn)
+    return redirect("core:orders")
+@login_required
+def order_list(request):
+    orders = CartOrder.objects.filter(user=request.user).order_by('-order_date')
+    return render(request, "core/order_list.html", {"orders": orders})
