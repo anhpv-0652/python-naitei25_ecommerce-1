@@ -34,4 +34,7 @@ urlpatterns = [
     
     #add review
     path("ajax-add-review/<pid>", ajax_add_review, name="ajax-add-review")
+    # Dashboard URL
+    path("dashboard/", customer_dashboard, name="dashboard"),
+    path("make-default-address/", make_address_default, name="make-default-address"),
 ]
