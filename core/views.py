@@ -42,7 +42,7 @@ from django.views.decorators.csrf import csrf_exempt
 from paypal.standard.forms import PayPalPaymentsForm
 from django.views.decorators.http import require_POST
 from django.shortcuts import render, redirect, get_object_or_404
-
+from core.forms import *
 
 
 def index(request):
