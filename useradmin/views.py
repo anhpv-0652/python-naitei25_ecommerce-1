@@ -16,6 +16,17 @@ import datetime
 # Create your views here.
 @login_required
 def dashboard(request):
+
+    # Kiểm tra quyền vendor
+    if request.user.role != "vendor":
+        return render(request, "useradmin/not_vendor.html", {
+            "error_message": _("Bạn cần đăng nhập dưới quyền vendor.")
+        })
+        
+    revenue = CartOrder.objects.aggregate(price=Sum(AMOUNT))
+    total_orders_count = CartOrder.objects.all()
+    all_products = Product.objects.all()
+
     # Kiểm tra người dùng có vendor chưa
     has_vendor = False
     try:
