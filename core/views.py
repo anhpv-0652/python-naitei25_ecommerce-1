@@ -1,14 +1,12 @@
-
+from django.shortcuts import render
 from django.http import HttpResponse
 from django.contrib import messages
 from django.shortcuts import redirect
 from django.http import JsonResponse
-from urllib3 import request
 from .models import Product
 from django.template.loader import render_to_string
 from django.db.models import Avg, Count
 from core.models import ProductReview
-from django.db.models import Avg
 from django.shortcuts import get_object_or_404
 from core.models import *
 from core.models import Image
@@ -22,28 +20,13 @@ from core.models import Coupon, Product, Category, Vendor, CartOrder, CartOrderP
 from taggit.models import Tag
 from core.constants import *
 from django.contrib.auth.decorators import login_required
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal
+from django.shortcuts import render
 from .models import Product, Image
+from core.forms import ProductReviewForm
 from django.utils import timezone
 from django.utils.translation import gettext as _
-from django.db.models import Min, Max
-from decimal import Decimal, InvalidOperation
-import calendar
-from django.db.models import Count, Avg
-from django.db.models.functions import ExtractMonth
-from userauths.models import *
-from django.views.decorators.http import require_http_methods
 from django.db import transaction
-from django.db.models import Min, Max
-from decimal import Decimal, InvalidOperation
-from django.urls import reverse
-from django.conf import settings
-from django.views.decorators.csrf import csrf_exempt
-from paypal.standard.forms import PayPalPaymentsForm
-from django.views.decorators.http import require_POST
-from django.shortcuts import render, redirect, get_object_or_404
-from core.forms import *
-
 
 def index(request):
     # Base query: các sản phẩm đã publish
@@ -608,8 +591,6 @@ def vendor_list_view(request):
     # Apply pagination
     paginator = Paginator(vendors, 12)  # Show 12 vendors per page
     page_obj = paginator.get_page(page_number)
-
-
 
     context = {
         "vendors": page_obj,
