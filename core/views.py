@@ -27,6 +27,13 @@ from core.forms import ProductReviewForm
 from django.utils import timezone
 from django.utils.translation import gettext as _
 from django.db import transaction
+from django.views.decorators.http import require_POST, require_GET, require_http_methods
+from django.db.models import Min, Max
+from django.db.models.functions import ExtractMonth
+from userauths.models import *
+from django.urls import reverse
+from paypal.standard.forms import PayPalPaymentsForm
+
 
 def index(request):
     # Base query: các sản phẩm đã publish
