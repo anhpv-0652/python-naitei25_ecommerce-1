@@ -6,28 +6,16 @@ from userauths.models import User
 from core.models import CartOrder, CartOrderProducts, Product, Category, ProductReview, Image, Vendor
 from useradmin.forms import AddProductForm
 from .constants import *
-from django.contrib.auth.decorators import login_required, permission_required
+from django.contrib.auth.decorators import login_required
 from django.views.decorators.csrf import csrf_exempt
 from django.contrib import messages
 from django.db import transaction
 from django.utils.translation import gettext as _
 import datetime
+from .decorators import vendor_required, vendor_profile_required, vendor_auth_required
 
-# Create your views here.
 @login_required
 def dashboard(request):
-
-    # Kiểm tra quyền vendor
-    if request.user.role != "vendor":
-        return render(request, "useradmin/not_vendor.html", {
-            "error_message": _("Bạn cần đăng nhập dưới quyền vendor.")
-        })
-        
-    revenue = CartOrder.objects.aggregate(price=Sum(AMOUNT))
-    total_orders_count = CartOrder.objects.all()
-    all_products = Product.objects.all()
-
-    # Kiểm tra người dùng có vendor chưa
     has_vendor = False
     try:
         vendor = Vendor.objects.get(user=request.user)
@@ -35,27 +23,20 @@ def dashboard(request):
     except Vendor.DoesNotExist:
         vendor = None
     
-    # Kiểm tra quyền vendor
     if request.user.role == "vendor":
-        # Người dùng có role vendor
         if not has_vendor:
-            # Có role vendor nhưng chưa có bản ghi vendor
             return render(request, "useradmin/dashboard.html", {
                 "has_vendor": False,
                 "need_vendor": True,
                 "message": _("Bạn cần tạo hồ sơ vendor để tiếp tục.")
             })
         else:
-            # Có role vendor và có bản ghi vendor
-            # Tiếp tục xử lý dashboard bình thường
             pass
     else:
-        # Không có role vendor
         return render(request, "useradmin/not_vendor.html", {
             "error_message": _("Bạn cần đăng nhập dưới quyền vendor.")
         })
     
-    # Code hiện tại ở đây - chỉ chạy khi người dùng có role vendor và có bản ghi vendor
     revenue = CartOrder.objects.filter(vendor=vendor).aggregate(price=Sum(AMOUNT))
     total_orders_count = CartOrder.objects.filter(vendor=vendor).count()
     all_products = Product.objects.filter(vendor=vendor)
@@ -92,21 +73,14 @@ def dashboard(request):
     return render(request, "useradmin/dashboard.html", context)
 
 @login_required
-def products(request):
-    # Kiểm tra người dùng có vendor chưa
-    try:
-        vendor = Vendor.objects.get(user=request.user)
-    except Vendor.DoesNotExist:
-        messages.warning(request, _("Bạn cần tạo hồ sơ vendor trước."))
-        return redirect("useradmin:dashboard")
-    
+@vendor_auth_required()
+def products(request, vendor):
     sort_by = request.GET.get('sort', 'title')
     order = request.GET.get('order', 'asc')
 
     if order == 'desc':
         sort_by = '-' + sort_by
 
-    # Lọc sản phẩm theo vendor hiện tại
     all_products = Product.objects.filter(vendor=vendor).annotate(
         display_price=Cast(
             Coalesce('amount', Value(0)), 
@@ -143,23 +117,16 @@ def products(request):
     return render(request, "useradmin/products.html", context)
 
 @login_required
-def add_product(request):
-    # Kiểm tra người dùng có vendor chưa
-    try:
-        vendor = Vendor.objects.get(user=request.user)
-    except Vendor.DoesNotExist:
-        messages.warning(request, _("Bạn cần tạo hồ sơ vendor trước."))
-        return redirect("useradmin:dashboard")
-    
+@vendor_auth_required()
+def add_product(request, vendor):
     if request.method == "POST":
         form = AddProductForm(request.POST, request.FILES)
         if form.is_valid():
             with transaction.atomic():
-                # Lưu sản phẩm nhưng chưa commit để gán vendor
                 product = form.save(commit=False)
-                product.vendor = vendor  # Gán vendor hiện tại
+                product.vendor = vendor
                 product.save()
-                form.save_m2m()  # Lưu many-to-many relationships
+                form.save_m2m()
                 
                 if 'image' in request.FILES:
                     Image.objects.create(
@@ -182,18 +149,10 @@ def add_product(request):
     return render(request, "useradmin/add-products.html", context)
 
 @login_required
-def edit_product(request, pid):
-    # Kiểm tra người dùng có vendor chưa
-    try:
-        vendor = Vendor.objects.get(user=request.user)
-    except Vendor.DoesNotExist:
-        messages.warning(request, _("Bạn cần tạo hồ sơ vendor trước."))
-        return redirect("useradmin:dashboard")
-    
-    # Lấy sản phẩm và kiểm tra quyền truy cập
+@vendor_auth_required()
+def edit_product(request, pid, vendor):
     try:
         product = Product.objects.get(pid=pid)
-        # Kiểm tra sản phẩm có thuộc về vendor hiện tại không
         if product.vendor != vendor:
             messages.error(request, _("Bạn không có quyền chỉnh sửa sản phẩm này."))
             return redirect("useradmin:dashboard-products")
@@ -212,7 +171,7 @@ def edit_product(request, pid):
         if form.is_valid():
             with transaction.atomic():
                 new_form = form.save(commit=False)
-                new_form.vendor = vendor  # Đảm bảo vendor không bị thay đổi
+                new_form.vendor = vendor
                 new_form.save()
                 form.save_m2m()
                 
@@ -242,18 +201,11 @@ def edit_product(request, pid):
     return render(request, "useradmin/edit-products.html", context)
 
 @login_required
-def delete_product(request, pid):
-    # Kiểm tra người dùng có vendor chưa
-    try:
-        vendor = Vendor.objects.get(user=request.user)
-    except Vendor.DoesNotExist:
-        messages.warning(request, _("Bạn cần tạo hồ sơ vendor trước."))
-        return redirect("useradmin:dashboard")
-    
+@vendor_auth_required()
+def delete_product(request, pid, vendor):
     try:
         product = Product.objects.get(pid=pid)
         
-        # Kiểm tra sản phẩm có thuộc về vendor hiện tại không
         if product.vendor != vendor:
             messages.error(request, _("Bạn không có quyền xóa sản phẩm này."))
             return redirect("useradmin:dashboard-products")
@@ -271,15 +223,13 @@ def delete_product(request, pid):
         return redirect("useradmin:dashboard-products")
 
 @login_required
-def orders(request):
-    # Kiểm tra người dùng có vendor chưa
-    try:
-        vendor = Vendor.objects.get(user=request.user)
-    except Vendor.DoesNotExist:
-        messages.warning(request, _("Bạn cần tạo hồ sơ vendor trước."))
-        return redirect("useradmin:dashboard")
+@vendor_auth_required()
+def orders(request, vendor):
+    # Lấy tham số filter từ request
+    status_filter = request.GET.get('status', '')
+    search_query = request.GET.get('search', '')
     
-    # Lọc đơn hàng theo vendor hiện tại
+    # Query cơ bản
     orders = CartOrder.objects.filter(vendor=vendor).select_related(
         'user', 
         'user__profile'
@@ -288,25 +238,47 @@ def orders(request):
         full_name=F(FULL_NAME),
         email=F(EMAIL),
         phone=F(PHONE),
-    ).order_by(f'-{ORDER_DATE}')
+    )
+    
+    # Áp dụng filter theo status
+    if status_filter and status_filter != 'all':
+        orders = orders.filter(order_status=status_filter)
+    
+    # Áp dụng search filter
+    if search_query:
+        orders = orders.filter(
+            Q(oid__icontains=search_query) |
+            Q(user__first_name__icontains=search_query) |
+            Q(user__last_name__icontains=search_query) |
+            Q(user__email__icontains=search_query) |
+            Q(phone__icontains=search_query)
+        )
+    
+    # Sắp xếp theo ngày mới nhất
+    orders = orders.order_by(f'-{ORDER_DATE}')
+    
+    # Định nghĩa các status choices
+    status_choices = [
+        ('', _('All Status')),
+        ('pending', _('Pending')),
+        ('processing', _('Processing')),
+        ('shipped', _('Shipped')),
+        ('delivered', _('Delivered')),
+    ]
     
     context = {
         'orders': orders,
         'vendor': vendor,
+        'status_filter': status_filter,
+        'search_query': search_query,
+        'status_choices': status_choices,
     }
     return render(request, "useradmin/orders.html", context)
 
 @login_required
-def order_detail(request, id):
-    # Kiểm tra người dùng có vendor chưa
+@vendor_auth_required()
+def order_detail(request, id, vendor):
     try:
-        vendor = Vendor.objects.get(user=request.user)
-    except Vendor.DoesNotExist:
-        messages.warning(request, _("Bạn cần tạo hồ sơ vendor trước."))
-        return redirect("useradmin:dashboard")
-    
-    try:
-        # Lấy đơn hàng và kiểm tra quyền truy cập
         order = CartOrder.objects.select_related(
             'user', 
             'user__profile'
@@ -317,7 +289,6 @@ def order_detail(request, id):
             phone=F(PHONE),
         ).get(id=id)
         
-        # Kiểm tra đơn hàng có thuộc về vendor hiện tại không
         if order.vendor != vendor:
             messages.error(request, _("Bạn không có quyền xem đơn hàng này."))
             return redirect("useradmin:orders")
@@ -342,19 +313,12 @@ def order_detail(request, id):
         return redirect("useradmin:orders")
 
 @login_required
+@vendor_auth_required()
 @csrf_exempt
-def change_order_status(request, oid):
-    # Kiểm tra người dùng có vendor chưa
-    try:
-        vendor = Vendor.objects.get(user=request.user)
-    except Vendor.DoesNotExist:
-        messages.warning(request, _("Bạn cần tạo hồ sơ vendor trước."))
-        return redirect("useradmin:dashboard")
-    
+def change_order_status(request, oid, vendor):
     try:
         order = CartOrder.objects.get(id=oid)
         
-        # Kiểm tra đơn hàng có thuộc về vendor hiện tại không
         if order.vendor != vendor:
             messages.error(request, _("Bạn không có quyền thay đổi trạng thái đơn hàng này."))
             return redirect("useradmin:orders")
@@ -371,37 +335,38 @@ def change_order_status(request, oid):
             }
             
             if current_status == 'delivered' and new_status != 'delivered':
-                messages.error(
-                    request, 
-                    _("Không thể thay đổi trạng thái đơn hàng đã giao. Vui lòng tạo yêu cầu hoàn trả/đổi hàng.")
-                )
+                messages.error(request, _("Không thể thay đổi trạng thái đơn hàng đã giao."))
             elif status_order.get(current_status, 0) > status_order.get(new_status, 0):
-                messages.error(
-                    request, 
-                    _("Không thể thay đổi trạng thái đơn hàng từ '{}' thành '{}'. Chỉ cho phép tiến trình tiến tới.").format(
-                        current_status, new_status
-                    )
-                )
+                messages.error(request, _("Không thể lùi trạng thái đơn hàng."))
             else:
+                # Cập nhật trạng thái
                 order.order_status = new_status
+                
+                # AUTO-UPDATE PAID_STATUS khi delivered
+                if new_status == 'delivered' and not order.paid_status:
+                    order.paid_status = True
+                    messages.success(request, _("Đơn hàng đã giao và tự động đánh dấu đã thanh toán."))
+                else:
+                    messages.success(request, _("Đã cập nhật trạng thái đơn hàng."))
+                
                 order.save()
-                messages.success(request, _("Trạng thái đơn hàng đã được thay đổi từ '{}' thành '{}'").format(
-                    current_status, new_status
-                ))
         
         return redirect("useradmin:order_detail", order.id)
+        
     except CartOrder.DoesNotExist:
         messages.error(request, _("Không tìm thấy đơn hàng."))
+        return redirect("useradmin:orders")
+    except Exception as e:
+        logger.error(f"Error changing order status: {e}")
+        messages.error(request, _("Có lỗi xảy ra khi thay đổi trạng thái đơn hàng."))
         return redirect("useradmin:orders")
 
 @login_required
 def shop_page(request):
-    # Kiểm tra người dùng có vendor chưa
     try:
         vendor = Vendor.objects.get(user=request.user)
         has_vendor = True
         
-        # Lấy ảnh vendor
         try:
             vendor_image = Image.objects.get(
                 object_type='vendor', 
@@ -412,22 +377,18 @@ def shop_page(request):
         except Image.DoesNotExist:
             vendor_image_url = None
         
-        # Lấy sản phẩm của vendor
         products = Product.objects.filter(vendor=vendor)
         
-        # Lấy thông tin doanh thu
         revenue = CartOrder.objects.filter(
             vendor=vendor,
             paid_status=True
         ).aggregate(price=Sum(AMOUNT))
         
-        # Lấy thông tin số lượng bán
         total_sales = CartOrderProducts.objects.filter(
             order__vendor=vendor,
             order__paid_status=True
         ).aggregate(qty=Sum("qty"))
         
-        # Lấy đánh giá của shop
         vendor_ratings = ProductReview.objects.filter(
             product__vendor=vendor
         ).aggregate(
@@ -456,18 +417,9 @@ def shop_page(request):
     return render(request, "useradmin/shop_page.html", context)
 
 @login_required
-def reviews(request):
-    # Kiểm tra người dùng có vendor chưa
-    try:
-        vendor = Vendor.objects.get(user=request.user)
-    except Vendor.DoesNotExist:
-        messages.warning(request, _("Bạn cần tạo hồ sơ vendor trước."))
-        return redirect("useradmin:dashboard")
-    
-    # Lấy danh sách sản phẩm của vendor hiện tại
+@vendor_auth_required()
+def reviews(request, vendor):
     vendor_products = Product.objects.filter(vendor=vendor).values_list('pid', flat=True)
-    
-    # Lấy đánh giá cho các sản phẩm của vendor
     reviews = ProductReview.objects.filter(product__pid__in=vendor_products)
     
     context = {
@@ -477,13 +429,8 @@ def reviews(request):
     return render(request, "useradmin/reviews.html", context)
 
 @login_required
+@vendor_required(redirect_url="core:index")
 def create_vendor(request):
-    # Kiểm tra role
-    if request.user.role != "vendor":
-        messages.error(request, _("Bạn cần có role vendor để tạo shop."))
-        return redirect('core:index')
-    
-    # Kiểm tra người dùng đã có vendor chưa
     try:
         vendor = Vendor.objects.get(user=request.user)
         messages.info(request, _("Bạn đã có tài khoản vendor"))
@@ -492,7 +439,6 @@ def create_vendor(request):
         pass
     
     if request.method == 'POST':
-        # Xử lý form tạo vendor
         title = request.POST.get('title')
         description = request.POST.get('description')
         address = request.POST.get('address')
@@ -503,7 +449,6 @@ def create_vendor(request):
         days_return = int(request.POST.get('days_return', 7))
         warranty_period = int(request.POST.get('warranty_period', 12))
         
-        # Tạo vendor mới
         with transaction.atomic():
             import shortuuid
             vid = f"v-{shortuuid.uuid()[:10]}"
@@ -522,7 +467,6 @@ def create_vendor(request):
                 user=request.user
             )
             
-            # Xử lý upload hình ảnh nếu có
             if 'image' in request.FILES:
                 Image.objects.create(
                     image=request.FILES['image'],
