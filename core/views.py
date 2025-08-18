@@ -413,8 +413,7 @@ def checkout(request, oid):
           discount = subtotal * Decimal(str(coupon.discount)) / Decimal('100')
           if discount > coupon.max_discount_amount:
               discount = coupon.max_discount_amount
-          subtotal = subtotal - discount + tax + shipping
-          total = subtotal
+          total = subtotal - discount + tax + shipping
           order.amount = total
           order.save()
     host = request.get_host()
