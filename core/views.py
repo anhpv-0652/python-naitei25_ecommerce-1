@@ -35,6 +35,15 @@ from paypal.standard.forms import PayPalPaymentsForm
 from django.views.decorators.http import require_POST
 from django.shortcuts import render, redirect, get_object_or_404
 
+from django.views.decorators.http import require_POST, require_GET, require_http_methods
+from django.db.models import Min, Max
+from django.db.models.functions import ExtractMonth
+from userauths.models import *
+from django.urls import reverse
+from paypal.standard.forms import PayPalPaymentsForm
+import calendar
+
+
 
 def index(request):
     # Base query: các sản phẩm đã publish
@@ -120,7 +129,7 @@ def cart_view(request):
         # Tạo hoặc cập nhật đơn hàng
         order, created = CartOrder.objects.get_or_create(
             user=request.user,
-            order_status='pending',
+            order_status='processing',
             defaults={
                 "vendor": vendor,
                 "amount": Decimal(cart_total_amount)
@@ -247,22 +256,96 @@ def ajax_add_review(request, pid):
         'average_reviews': average_reviews
        }
     )
-def product_list_view(request):
-    products = Product.objects.filter(product_status="published").order_by("-pid")
-    tags = Tag.objects.all().order_by("-id")[:TAG_LIMIT]
-
-    context = {
-        "products":products,
-        "tags":tags,
-    }
-
-    return render(request, 'core/product-list.html', context)
 
 def about_us(request):
     return render(request, "core/about_us.html")
-
+@login_required
 def customer_dashboard(request):
-    return render(request, 'core/dashboard.html')
+    CART_STATUS = 'processing'
+
+    # Base queryset cho user hiện tại (tối ưu join)
+    base_qs = (
+        CartOrder.objects
+        .filter(user=request.user)
+        .select_related('vendor')
+        .prefetch_related('order_products')
+    )
+
+    # Giỏ hàng (đơn ở trạng thái processing)
+    carts_list = base_qs.filter(order_status=CART_STATUS).order_by('-order_date')
+
+    # Đơn hàng đã chốt (không phải processing)
+    orders_list = base_qs.exclude(order_status=CART_STATUS).order_by('-order_date')
+
+    # Địa chỉ của user
+    address_list = Address.objects.filter(user=request.user).order_by('-id')
+
+    # Thống kê số đơn hàng (đÃ CHỐT) theo tháng
+    monthly = (
+        base_qs.exclude(order_status=CART_STATUS)
+        .annotate(month=ExtractMonth('order_date'))
+        .values('month')
+        .annotate(count=Count('id'))
+        .order_by('month')
+    )
+
+    month = []
+    total_orders = []
+    for row in monthly:
+        # row['month'] có thể là None nếu DB trả về kỳ lạ; an toàn thêm check
+        m = row['month']
+        if m:
+            month.append(calendar.month_name[m])
+            total_orders.append(row['count'])
+
+    # Xử lý thêm địa chỉ
+    if request.method == "POST":
+        addr_text = request.POST.get("address", "").strip()
+        mobile = request.POST.get("mobile", "").strip()
+
+        if not addr_text or not mobile:
+            messages.error(request, "Vui lòng nhập đầy đủ địa chỉ và số điện thoại.")
+        else:
+            Address.objects.create(
+                user=request.user,
+                address=addr_text,
+                mobile=mobile,
+            )
+            messages.success(request, "Đã thêm địa chỉ thành công.")
+        return redirect("core:dashboard")
+
+    # Hồ sơ user (an toàn tránh DoesNotExist)
+    user_profile = Profile.objects.filter(user=request.user).first()
+
+    context = {
+        "user_profile": user_profile,
+        # Danh sách
+        "carts_list": carts_list,           # giỏ hàng (processing)
+        "orders_list": orders_list,         # đơn hàng đã chốt
+        "address_list": address_list,
+        # Thống kê
+        "month": month,
+        "total_orders": total_orders,
+    }
+    return render(request, 'core/dashboard.html', context)
+@login_required
+@require_http_methods(["GET", "POST"])
+def make_address_default(request):
+    addr_id = request.GET.get("id") or request.POST.get("id")
+    if not addr_id:
+        return JsonResponse({"boolean": False, "msg": "missing id"}, status=400)
+
+    try:
+        with transaction.atomic():
+            # Chỉ cập nhật trong phạm vi user hiện tại
+            Address.objects.filter(user=request.user, status=True).update(status=False)
+            addr = Address.objects.select_for_update().get(id=addr_id, user=request.user)
+            addr.status = True
+            addr.save(update_fields=["status"])
+    except Address.DoesNotExist:
+        return JsonResponse({"boolean": False, "msg": "not found"}, status=404)
+
+    return JsonResponse({"boolean": True, "id": int(addr_id)})
 
 def search_view(request):
     return render(request, "core/search.html")
@@ -347,6 +430,7 @@ def checkout(request, oid):
           discount = subtotal * Decimal(str(coupon.discount)) / Decimal('100')
           if discount > coupon.max_discount_amount:
               discount = coupon.max_discount_amount
+
           total = subtotal - discount + tax + shipping
           order.amount = total
           order.save()
@@ -381,7 +465,9 @@ def payment_completed_view(request, oid):
 
     if order.paid_status == False:
         order.paid_status = True
+
         order.order_status = 'processing'
+
         order.save()
 
     context = {
@@ -393,9 +479,12 @@ def payment_failed_view(request):
     return render(request, 'core/payment-failed.html')
 
 def order_detail(request, id):
-    context = {"order_items": get_order_items()}
+    order = CartOrder.objects.get(user=request.user, id=id)
+    order_items = CartOrderProducts.objects.filter(order=order)
+    context = {
+        "order_items": order_items,
+    }
     return render(request, 'core/order-detail.html', context)
-
 def category_list_view(request):
     categories = Category.objects.all()
     category_data = []
@@ -455,6 +544,14 @@ def product_detail_view(request, pid):
     for r in reviews:
         width = r.rating * 20
         reviews_with_width.append((r, width))
+
+
+    reviews = ProductReview.objects.filter(product=product).order_by("-date")
+    reviews_with_width = []
+    for r in reviews:
+        width = r.rating * 20
+        reviews_with_width.append((r, width))
+
     # average review
     average_rating = ProductReview.objects.filter(product=product).aggregate(rating=Avg('rating'))
     rating_counts = get_rating_counts(product)
@@ -629,6 +726,105 @@ def get_rating_counts(product):
     return results
 
 
+def _to_decimal(v):
+    if v in (None, ""): 
+        return None
+    try:
+        return Decimal(str(v).replace(",", "."))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+def _getlist(request, name):
+    # hỗ trợ cả name và name[] (tùy frontend gửi)
+    return request.GET.getlist(f"{name}[]") or request.GET.getlist(name)
+
+def build_products_qs(request):
+    """Trả về queryset đã áp dụng các filter từ URL."""
+    categories = _getlist(request, "category")
+    vendors    = _getlist(request, "vendor")
+    min_price  = _to_decimal(request.GET.get("min_price"))
+    max_price  = _to_decimal(request.GET.get("max_price"))
+
+    qs = Product.objects.filter(product_status="published")
+
+    if min_price is not None:
+        qs = qs.filter(amount__gte=min_price)
+    if max_price is not None:
+        qs = qs.filter(amount__lte=max_price)
+    if categories:
+        qs = qs.filter(category_id__in=categories)
+    if vendors:
+        qs = qs.filter(vendor_id__in=vendors)
+
+    return qs.select_related("category", "vendor").order_by("-pid")
+# --------------------------------
+
+def product_list_view(request):
+    # dữ liệu cho sidebar/filter
+    tags = Tag.objects.all().order_by("-id")[:TAG_LIMIT]
+    categories_all = Category.objects.all()
+    vendors_all = Vendor.objects.all()
+    min_max_price = Product.objects.aggregate(Min("amount"), Max("amount"))
+
+    # áp dụng filter từ URL
+    qs = build_products_qs(request)
+
+    # phân trang
+    try:
+        page_number = int(request.GET.get("page", DEFAULT_PAGE))
+    except (TypeError, ValueError):
+        page_number = DEFAULT_PAGE
+    try:
+        per_page = int(request.GET.get("per_page", PRODUCTS_PER_PAGE))
+    except (TypeError, ValueError):
+        per_page = PRODUCTS_PER_PAGE
+
+    paginator = Paginator(qs, per_page)
+    page_obj  = paginator.get_page(page_number)
+
+    context = {
+        "products": page_obj,          # Page object, lặp trong template được
+        "page_obj": page_obj,
+        "tags": tags,
+        "categories": categories_all,
+        "vendors": vendors_all,
+        "min_max_price": min_max_price,   # dùng {{ min_max_price.amount__min }} / {{ ...max }}
+    }
+    return render(request, "core/product-list.html", context)
+
+
+def filter_product(request):
+    # Dùng chung logic lọc
+    qs = build_products_qs(request)
+
+    # phân trang (nếu frontend truyền)
+    try:
+        page_number = int(request.GET.get("page", DEFAULT_PAGE))
+    except (TypeError, ValueError):
+        page_number = DEFAULT_PAGE
+    try:
+        per_page = int(request.GET.get("per_page", PRODUCTS_PER_PAGE))
+    except (TypeError, ValueError):
+        per_page = PRODUCTS_PER_PAGE
+
+    paginator = Paginator(qs, per_page)
+    page_obj  = paginator.get_page(page_number)
+
+    # render partial (nhớ truyền request để giữ query cho pagination)
+    html = render_to_string(
+        "core/async/product-list.html",
+        {"products": page_obj, "page_obj": page_obj},
+        request=request,
+    )
+
+    return JsonResponse({
+        "data": html,
+        "count": paginator.count,
+        "page": page_obj.number,
+        "has_next": page_obj.has_next(),
+        "next_page": page_obj.next_page_number() if page_obj.has_next() else None,
+    })
+
 
 @require_POST
 @login_required
@@ -653,6 +849,7 @@ def cod_checkout(request):
     if not order.amount or order.amount <= 0:
         amt = order.order_products.aggregate(total=Sum('total'))['total'] or Decimal("0")
         order.amount = amt.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
     for item in order.order_products.all():
       try:
           # Map từ tên sản phẩm (item) sang Product
@@ -669,6 +866,7 @@ def cod_checkout(request):
               product.in_stock = False
               product.product_status = 'draft'
           product.save(update_fields=["stock_count", "in_stock",'product_status'])
+
 
     # Cập nhật trạng thái COD theo yêu cầu
     order.paid_status = False
@@ -715,7 +913,9 @@ def cod_accept(request, oid):
     """
     order = get_object_or_404(CartOrder, id=oid, user=request.user)
 
+
     order.order_status = 'processing'
+
     order.paid_status = False
     order.save(update_fields=["order_status", "paid_status"])
 
