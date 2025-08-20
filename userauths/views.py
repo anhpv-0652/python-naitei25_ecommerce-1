@@ -53,7 +53,6 @@ def register_view(request):
                 "email": email
             }
             return render(request, "userauths/activation_pending.html", context)
-
     else:
         form = UserRegisterForm()
     return render(request, "userauths/sign-up.html", {"form": form})
@@ -94,6 +93,7 @@ def logout_view(request):
     messages.success(request, "You logged out.")
     return redirect("userauths:sign-in")
 
+
 def profile_update(request):
     profile = Profile.objects.get(user=request.user)
     if request.method == "POST":
@@ -113,6 +113,7 @@ def profile_update(request):
     }
 
     return render(request, "userauths/profile-edit.html", context)
+
 
 def activate_account(request, uidb64, token):
     try:

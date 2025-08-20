@@ -304,13 +304,15 @@ def change_order_status(request, oid, vendor):
 
             if current_status == 'delivered' and new_status != 'delivered':
                 messages.error(
-                    request, 
-                    _("Cannot change status of delivered order. Please create a return/exchange request.")
+
+                    request,
+                    _("Không thể thay đổi trạng thái đơn hàng đã giao. Vui lòng tạo yêu cầu hoàn trả/đổi hàng.")
                 )
             elif status_order.get(current_status, 0) > status_order.get(new_status, 0):
                 messages.error(
-                    request, 
-                    _("Cannot change order status from '{}' to '{}'. Only forward progression is allowed.").format(
+                    request,
+                    _("Không thể thay đổi trạng thái đơn hàng từ '{}' thành '{}'. Chỉ cho phép tiến trình tiến tới.").format(
+
                         current_status, new_status
                     )
                 )
@@ -440,8 +442,9 @@ def create_vendor(request):
                     object_id=vid,
                     is_primary=True
                 )
-        
-        messages.success(request, _("Your vendor account has been created successfully"))
+
+        messages.success(request, _("Tài khoản vendor của bạn đã được tạo thành công"))
+
         return redirect('useradmin:dashboard')
 
     return render(request, 'useradmin/create_vendor.html')

@@ -34,6 +34,7 @@ from django.views.decorators.csrf import csrf_exempt
 from paypal.standard.forms import PayPalPaymentsForm
 from django.views.decorators.http import require_POST
 from django.shortcuts import render, redirect, get_object_or_404
+
 from django.views.decorators.http import require_POST, require_GET, require_http_methods
 from django.db.models import Min, Max
 from django.db.models.functions import ExtractMonth
@@ -41,6 +42,7 @@ from userauths.models import *
 from django.urls import reverse
 from paypal.standard.forms import PayPalPaymentsForm
 import calendar
+
 
 
 def index(request):
@@ -192,24 +194,40 @@ def delete_item_from_cart(request):
     context = render_to_string("core/async/cart-table.html", {"cart_data":request.session['cart_data_obj'], 'totalcartitems': len(request.session['cart_data_obj']), 'cart_total_amount':cart_total_amount})
     return JsonResponse({"data": context, 'totalcartitems': len(request.session['cart_data_obj'])})
 
+
 @login_required
 def update_cart(request):
-    product_id = str(request.GET['id'])
-    product_qty = request.GET['qty']
+    product_id = str(request.GET.get("id"))
+    product_qty = int(request.GET.get("qty", 1))
 
-    if 'cart_data_obj' in request.session:
-        if product_id in request.session['cart_data_obj']:
-            cart_data = request.session['cart_data_obj']
-            cart_data[str(request.GET['id'])]['qty'] = product_qty
-            request.session['cart_data_obj'] = cart_data
+    cart = request.session.get("cart_data_obj", {})
+    try:
+        product = Product.objects.get(pid=product_id)
+    except Product.DoesNotExist:
+        return JsonResponse({"success": False, "error": "Product not found"})
+    message = None
+    if product_qty < 1:
+        product_qty = 1
+        message = "Số lượng tối thiểu là 1."
+    elif product_qty > product.stock_count:
+        product_qty = product.stock_count
+        message = f"Chỉ còn {product.stock_count} sản phẩm trong kho."
+    if product_id in cart:
+        price = float(cart[product_id]["price"])
+        cart[product_id]["qty"] = product_qty
+        cart[product_id]["subtotal"] = product_qty * price
+        request.session["cart_data_obj"] = cart
 
-    cart_total_amount = 0
-    if 'cart_data_obj' in request.session:
-        for p_id, item in request.session['cart_data_obj'].items():
-            cart_total_amount += int(item['qty']) * float(item['price'])
+    cart_total_amount = sum(float(item["subtotal"]) for item in cart.values())
 
-    context = render_to_string("core/async/cart-table.html", {"cart_data":request.session['cart_data_obj'], 'totalcartitems': len(request.session['cart_data_obj']), 'cart_total_amount':cart_total_amount})
-    return JsonResponse({"data": context, 'totalcartitems': len(request.session['cart_data_obj'])})
+    return JsonResponse({
+        "success": True,
+        "subtotal": cart[product_id]["subtotal"],
+        "cart_total": cart_total_amount,
+        "qty": cart[product_id]["qty"],
+        "stock": product.stock_count,
+        "message": message,
+    })
 
 @login_required
 def ajax_add_review(request, pid):
@@ -395,7 +413,8 @@ def checkout(request, oid):
       shipping = Decimal('0')
       discount = Decimal('0')
       total = subtotal
-
+      order.amount = total
+      order.save()
       # Xử lý áp dụng coupon
       if request.method == "POST" and "apply_coupon" in request.POST:
           code = request.POST.get("code", "").strip()
@@ -411,8 +430,8 @@ def checkout(request, oid):
           discount = subtotal * Decimal(str(coupon.discount)) / Decimal('100')
           if discount > coupon.max_discount_amount:
               discount = coupon.max_discount_amount
-          subtotal = subtotal - discount + tax + shipping
-          total = subtotal
+
+          total = subtotal - discount + tax + shipping
           order.amount = total
           order.save()
     host = request.get_host()
@@ -446,7 +465,9 @@ def payment_completed_view(request, oid):
 
     if order.paid_status == False:
         order.paid_status = True
-        order.order_status = 'shipped'
+
+        order.order_status = 'processing'
+
         order.save()
 
     context = {
@@ -524,11 +545,13 @@ def product_detail_view(request, pid):
         width = r.rating * 20
         reviews_with_width.append((r, width))
 
+
     reviews = ProductReview.objects.filter(product=product).order_by("-date")
     reviews_with_width = []
     for r in reviews:
         width = r.rating * 20
         reviews_with_width.append((r, width))
+
     # average review
     average_rating = ProductReview.objects.filter(product=product).aggregate(rating=Avg('rating'))
     rating_counts = get_rating_counts(product)
@@ -606,7 +629,6 @@ def vendor_list_view(request):
     # Apply pagination
     paginator = Paginator(vendors, 12)  # Show 12 vendors per page
     page_obj = paginator.get_page(page_number)
-
     context = {
         "vendors": page_obj,
         "sort_by": sort_by,
@@ -702,6 +724,7 @@ def get_rating_counts(product):
             'count': rating_dict.get(value, 0)
         })
     return results
+
 
 def _to_decimal(v):
     if v in (None, ""): 
@@ -802,6 +825,7 @@ def filter_product(request):
         "next_page": page_obj.next_page_number() if page_obj.has_next() else None,
     })
 
+
 @require_POST
 @login_required
 def cod_checkout(request):
@@ -825,6 +849,24 @@ def cod_checkout(request):
     if not order.amount or order.amount <= 0:
         amt = order.order_products.aggregate(total=Sum('total'))['total'] or Decimal("0")
         order.amount = amt.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+    for item in order.order_products.all():
+      try:
+          # Map từ tên sản phẩm (item) sang Product
+        product = Product.objects.get(title=item.item)
+      except Product.DoesNotExist:
+        continue  # bỏ qua nếu không tìm thấy
+
+      if product.stock_count is not None:
+          # stock_count nên là IntegerField, không phải CharField
+          current_stock = int(product.stock_count or 0)
+          new_stock = max(0, current_stock - item.qty)
+          product.stock_count = new_stock
+          if new_stock == 0:
+              product.in_stock = False
+              product.product_status = 'draft'
+          product.save(update_fields=["stock_count", "in_stock",'product_status'])
+
 
     # Cập nhật trạng thái COD theo yêu cầu
     order.paid_status = False
@@ -871,7 +913,9 @@ def cod_accept(request, oid):
     """
     order = get_object_or_404(CartOrder, id=oid, user=request.user)
 
-    order.order_status = 'shipped'
+
+    order.order_status = 'processing'
+
     order.paid_status = False
     order.save(update_fields=["order_status", "paid_status"])
 
