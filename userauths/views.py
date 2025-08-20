@@ -4,38 +4,56 @@ from django.contrib.auth import login, authenticate, logout
 from django.contrib import messages
 from django.utils.translation import gettext as _
 from userauths.models import User
-from utils.email_service import send_activation_email
+from utils.email_service import send_activation_email, is_valid_email
 from django.utils.http import urlsafe_base64_encode
 from django.utils.encoding import force_bytes
 from django.contrib.auth.tokens import default_token_generator
 from django.utils.http import urlsafe_base64_decode
 from userauths.models import User,Profile
+from django.core.mail import BadHeaderError
+import logging
 
-
+logger = logging.getLogger(__name__)
 
 def register_view(request):
     if request.user.is_authenticated:
         logout(request)
+        messages.info(request, _("Bạn đã được đăng xuất để đăng ký tài khoản mới."))
         return redirect('userauths:sign-up')
-    
+
     if request.method == "POST":
         form = UserRegisterForm(request.POST or None)
         if form.is_valid():
+            email = form.cleaned_data.get("email")
+
+            if not is_valid_email(email):
+                messages.error(request, _("Email không hợp lệ hoặc không tồn tại."))
+                return redirect('userauths:sign-up')
             new_user = form.save(commit=False)
             new_user.is_active = False
             new_user.save()
             username = form.cleaned_data.get("username")
-            email = form.cleaned_data.get("email")
+
             #Tao token va uidb64
             uidb64 = urlsafe_base64_encode(force_bytes(new_user.pk))
             token = default_token_generator.make_token(new_user)
-            send_activation_email(email, username, uidb64, token)
+            try:
+                send_activation_email(email, username, uidb64, token)
+            except BadHeaderError:
+                logger.error(f"Lỗi header khi gửi mail tới {email}")
+                messages.error(request, _("Có lỗi khi gửi email kích hoạt."))
+                return redirect("userauths:sign-up")
+            except Exception as e:
+                logger.error(f"Gửi mail kích hoạt thất bại: {e}")
+                messages.error(request, _("Không thể gửi email kích hoạt. Vui lòng thử lại sau."))
+                return redirect("userauths:sign-up")
             #send_welcome_email(email, username)
             context = {
                 "username": username,
                 "email": email
             }
-            return render(request, "userauths/activation_pending.html", context)  
+            return render(request, "userauths/activation_pending.html", context)
+
     else:
         form = UserRegisterForm()
     return render(request, "userauths/sign-up.html", {"form": form})
@@ -96,8 +114,6 @@ def profile_update(request):
 
     return render(request, "userauths/profile-edit.html", context)
 
-        
-        
 def activate_account(request, uidb64, token):
     try:
         uid = urlsafe_base64_decode(uidb64).decode()
@@ -113,4 +129,3 @@ def activate_account(request, uidb64, token):
     else:
         messages.error(request, "Liên kết kích hoạt không hợp lệ hoặc đã hết hạn.")
         return redirect("core:index")
-    

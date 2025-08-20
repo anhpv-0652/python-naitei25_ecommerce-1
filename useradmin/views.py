@@ -1,68 +1,51 @@
-from django.shortcuts import render, redirect
-from django.db.models import Sum, F, DecimalField, Case, When, Value, Avg
+from django.http import JsonResponse
+from django.shortcuts import render, redirect, get_object_or_404
+from django.db.models import Sum, F, DecimalField, Case, When, Value, Avg, Q, Count
 from django.db.models.functions import Cast, Coalesce
 from django.core.paginator import Paginator, EmptyPage, PageNotAnInteger
 from userauths.models import User
-from core.models import CartOrder, CartOrderProducts, Product, Category, ProductReview, Image, Vendor
-from useradmin.forms import AddProductForm
+from core.models import CartOrder, CartOrderProducts, Product, Category, ProductReview, Image, Vendor, Coupon, CouponUser
+from useradmin.forms import AddProductForm, CouponForm
 from .constants import *
-from django.contrib.auth.decorators import login_required, permission_required
+from django.contrib.auth.decorators import login_required
 from django.views.decorators.csrf import csrf_exempt
 from django.contrib import messages
 from django.db import transaction
 from django.utils.translation import gettext as _
 import datetime
+from .decorators import vendor_required, vendor_profile_required, vendor_auth_required
+from django.utils import timezone
 
-# Create your views here.
 @login_required
 def dashboard(request):
-
-    # Kiểm tra quyền vendor
-    if request.user.role != "vendor":
-        return render(request, "useradmin/not_vendor.html", {
-            "error_message": _("Bạn cần đăng nhập dưới quyền vendor.")
-        })
-        
-    revenue = CartOrder.objects.aggregate(price=Sum(AMOUNT))
-    total_orders_count = CartOrder.objects.all()
-    all_products = Product.objects.all()
-
-    # Kiểm tra người dùng có vendor chưa
     has_vendor = False
     try:
         vendor = Vendor.objects.get(user=request.user)
         has_vendor = True
     except Vendor.DoesNotExist:
         vendor = None
-    
-    # Kiểm tra quyền vendor
+
     if request.user.role == "vendor":
-        # Người dùng có role vendor
         if not has_vendor:
-            # Có role vendor nhưng chưa có bản ghi vendor
             return render(request, "useradmin/dashboard.html", {
                 "has_vendor": False,
                 "need_vendor": True,
-                "message": _("Bạn cần tạo hồ sơ vendor để tiếp tục.")
+                "message": _("You need to create a vendor profile to continue.")
             })
         else:
-            # Có role vendor và có bản ghi vendor
-            # Tiếp tục xử lý dashboard bình thường
             pass
     else:
-        # Không có role vendor
         return render(request, "useradmin/not_vendor.html", {
-            "error_message": _("Bạn cần đăng nhập dưới quyền vendor.")
+            "error_message": _("You need to login with vendor privileges.")
         })
-    
-    # Code hiện tại ở đây - chỉ chạy khi người dùng có role vendor và có bản ghi vendor
+
     revenue = CartOrder.objects.filter(vendor=vendor).aggregate(price=Sum(AMOUNT))
     total_orders_count = CartOrder.objects.filter(vendor=vendor).count()
     all_products = Product.objects.filter(vendor=vendor)
     all_categories = Category.objects.all()
     new_customers = User.objects.all().order_by("-id")[:6]
     latest_orders = CartOrder.objects.filter(vendor=vendor).select_related(
-        'user', 
+        'user',
         'user__profile'
     ).annotate(
         display_id=F(DISPLAY_ID),
@@ -70,11 +53,11 @@ def dashboard(request):
         email=F(EMAIL),
         phone=F(PHONE),
         total=Cast(
-            Coalesce(F(AMOUNT), Value(0)), 
+            Coalesce(F(AMOUNT), Value(0)),
             output_field=DecimalField(max_digits=MAX_DIGITS_DECIMAL, decimal_places=DECIMAL_PLACES)
         )
     ).order_by('-order_date')[:10]
-    
+
     this_month = datetime.datetime.now().month
     monthly_revenue = CartOrder.objects.filter(vendor=vendor, order_date__month=this_month).aggregate(price=Sum(AMOUNT))
 
@@ -92,36 +75,29 @@ def dashboard(request):
     return render(request, "useradmin/dashboard.html", context)
 
 @login_required
-def products(request):
-    # Kiểm tra người dùng có vendor chưa
-    try:
-        vendor = Vendor.objects.get(user=request.user)
-    except Vendor.DoesNotExist:
-        messages.warning(request, _("Bạn cần tạo hồ sơ vendor trước."))
-        return redirect("useradmin:dashboard")
-    
+@vendor_auth_required()
+def products(request, vendor):
     sort_by = request.GET.get('sort', 'title')
     order = request.GET.get('order', 'asc')
 
     if order == 'desc':
         sort_by = '-' + sort_by
 
-    # Lọc sản phẩm theo vendor hiện tại
     all_products = Product.objects.filter(vendor=vendor).annotate(
         display_price=Cast(
-            Coalesce('amount', Value(0)), 
+            Coalesce('amount', Value(0)),
             output_field=DecimalField(max_digits=MAX_DIGITS_DECIMAL, decimal_places=DECIMAL_PLACES)
         ),
         display_old_price=Cast(
-            Coalesce('old_price', Value(0)), 
+            Coalesce('old_price', Value(0)),
             output_field=DecimalField(max_digits=MAX_DIGITS_DECIMAL, decimal_places=DECIMAL_PLACES)
         ),
         discount_percent=Case(
             When(
                 old_price__gt=0,
                 then=Cast(
-                    (Cast(Coalesce(F('old_price'), Value(0)), DecimalField(max_digits=MAX_DIGITS_DECIMAL, decimal_places=DECIMAL_PLACES)) - 
-                     Cast(Coalesce(F('amount'), Value(0)), DecimalField(max_digits=MAX_DIGITS_DECIMAL, decimal_places=DECIMAL_PLACES))) * 100.0 / 
+                    (Cast(Coalesce(F('old_price'), Value(0)), DecimalField(max_digits=MAX_DIGITS_DECIMAL, decimal_places=DECIMAL_PLACES)) -
+                     Cast(Coalesce(F('amount'), Value(0)), DecimalField(max_digits=MAX_DIGITS_DECIMAL, decimal_places=DECIMAL_PLACES))) * 100.0 /
                     Cast(Coalesce(F('old_price'), Value(1)), DecimalField(max_digits=MAX_DIGITS_DECIMAL, decimal_places=DECIMAL_PLACES)),
                     output_field=DecimalField(max_digits=MAX_DIGITS_DECIMAL, decimal_places=DECIMAL_PLACES)
                 )
@@ -132,7 +108,7 @@ def products(request):
     ).order_by(sort_by)
 
     all_categories = Category.objects.all()
-    
+
     context = {
         "all_products": all_products,
         "all_categories": all_categories,
@@ -143,24 +119,17 @@ def products(request):
     return render(request, "useradmin/products.html", context)
 
 @login_required
-def add_product(request):
-    # Kiểm tra người dùng có vendor chưa
-    try:
-        vendor = Vendor.objects.get(user=request.user)
-    except Vendor.DoesNotExist:
-        messages.warning(request, _("Bạn cần tạo hồ sơ vendor trước."))
-        return redirect("useradmin:dashboard")
-    
+@vendor_auth_required()
+def add_product(request, vendor):
     if request.method == "POST":
         form = AddProductForm(request.POST, request.FILES)
         if form.is_valid():
             with transaction.atomic():
-                # Lưu sản phẩm nhưng chưa commit để gán vendor
                 product = form.save(commit=False)
-                product.vendor = vendor  # Gán vendor hiện tại
+                product.vendor = vendor
                 product.save()
-                form.save_m2m()  # Lưu many-to-many relationships
-                
+                form.save_m2m()
+
                 if 'image' in request.FILES:
                     Image.objects.create(
                         image=request.FILES['image'],
@@ -169,12 +138,12 @@ def add_product(request):
                         object_id=product.pid,
                         is_primary=True
                     )
-            
+
             messages.success(request, f"Product '{product.title}' added successfully")
             return redirect("useradmin:dashboard-products")
     else:
         form = AddProductForm()
-    
+
     context = {
         'form': form,
         'vendor': vendor,
@@ -182,28 +151,20 @@ def add_product(request):
     return render(request, "useradmin/add-products.html", context)
 
 @login_required
-def edit_product(request, pid):
-    # Kiểm tra người dùng có vendor chưa
-    try:
-        vendor = Vendor.objects.get(user=request.user)
-    except Vendor.DoesNotExist:
-        messages.warning(request, _("Bạn cần tạo hồ sơ vendor trước."))
-        return redirect("useradmin:dashboard")
-    
-    # Lấy sản phẩm và kiểm tra quyền truy cập
+@vendor_auth_required()
+def edit_product(request, pid, vendor):
     try:
         product = Product.objects.get(pid=pid)
-        # Kiểm tra sản phẩm có thuộc về vendor hiện tại không
         if product.vendor != vendor:
-            messages.error(request, _("Bạn không có quyền chỉnh sửa sản phẩm này."))
+            messages.error(request, _("You don't have permission to edit this product."))
             return redirect("useradmin:dashboard-products")
     except Product.DoesNotExist:
-        messages.error(request, _("Không tìm thấy sản phẩm."))
+        messages.error(request, _("Product not found."))
         return redirect("useradmin:dashboard-products")
-    
+
     primary_image = Image.objects.filter(
-        object_type='product', 
-        object_id=product.pid, 
+        object_type='product',
+        object_id=product.pid,
         is_primary=True
     ).first()
 
@@ -212,14 +173,14 @@ def edit_product(request, pid):
         if form.is_valid():
             with transaction.atomic():
                 new_form = form.save(commit=False)
-                new_form.vendor = vendor  # Đảm bảo vendor không bị thay đổi
+                new_form.vendor = vendor
                 new_form.save()
                 form.save_m2m()
-                
+
                 if 'image' in request.FILES:
                     if primary_image:
                         primary_image.delete()
-                    
+
                     Image.objects.create(
                         image=request.FILES['image'],
                         alt_text=product.title,
@@ -227,12 +188,12 @@ def edit_product(request, pid):
                         object_id=product.pid,
                         is_primary=True
                     )
-            
+
             messages.success(request, f"Product '{product.title}' updated successfully")
             return redirect("useradmin:dashboard-products")
     else:
         form = AddProductForm(instance=product)
-    
+
     context = {
         'form': form,
         'product': product,
@@ -242,46 +203,32 @@ def edit_product(request, pid):
     return render(request, "useradmin/edit-products.html", context)
 
 @login_required
-def delete_product(request, pid):
-    # Kiểm tra người dùng có vendor chưa
-    try:
-        vendor = Vendor.objects.get(user=request.user)
-    except Vendor.DoesNotExist:
-        messages.warning(request, _("Bạn cần tạo hồ sơ vendor trước."))
-        return redirect("useradmin:dashboard")
-    
+@vendor_auth_required()
+def delete_product(request, pid, vendor):
     try:
         product = Product.objects.get(pid=pid)
-        
-        # Kiểm tra sản phẩm có thuộc về vendor hiện tại không
+
         if product.vendor != vendor:
-            messages.error(request, _("Bạn không có quyền xóa sản phẩm này."))
+            messages.error(request, _("You don't have permission to delete this product."))
             return redirect("useradmin:dashboard-products")
-        
+
         product.status = False
         product.in_stock = False
         product.product_status = "deleted"
         product.save()
-        
+
         messages.success(request, f"Product '{product.title}' has been marked as deleted")
         return redirect("useradmin:dashboard-products")
-    
+
     except Product.DoesNotExist:
         messages.error(request, "Product not found")
         return redirect("useradmin:dashboard-products")
 
 @login_required
-def orders(request):
-    # Kiểm tra người dùng có vendor chưa
-    try:
-        vendor = Vendor.objects.get(user=request.user)
-    except Vendor.DoesNotExist:
-        messages.warning(request, _("Bạn cần tạo hồ sơ vendor trước."))
-        return redirect("useradmin:dashboard")
-    
-    # Lọc đơn hàng theo vendor hiện tại
+@vendor_auth_required()
+def orders(request, vendor):
     orders = CartOrder.objects.filter(vendor=vendor).select_related(
-        'user', 
+        'user',
         'user__profile'
     ).annotate(
         display_id=F(DISPLAY_ID),
@@ -289,7 +236,7 @@ def orders(request):
         email=F(EMAIL),
         phone=F(PHONE),
     ).order_by(f'-{ORDER_DATE}')
-    
+
     context = {
         'orders': orders,
         'vendor': vendor,
@@ -297,18 +244,11 @@ def orders(request):
     return render(request, "useradmin/orders.html", context)
 
 @login_required
-def order_detail(request, id):
-    # Kiểm tra người dùng có vendor chưa
+@vendor_auth_required()
+def order_detail(request, id, vendor):
     try:
-        vendor = Vendor.objects.get(user=request.user)
-    except Vendor.DoesNotExist:
-        messages.warning(request, _("Bạn cần tạo hồ sơ vendor trước."))
-        return redirect("useradmin:dashboard")
-    
-    try:
-        # Lấy đơn hàng và kiểm tra quyền truy cập
         order = CartOrder.objects.select_related(
-            'user', 
+            'user',
             'user__profile'
         ).annotate(
             display_id=F(DISPLAY_ID),
@@ -316,14 +256,13 @@ def order_detail(request, id):
             email=F(EMAIL),
             phone=F(PHONE),
         ).get(id=id)
-        
-        # Kiểm tra đơn hàng có thuộc về vendor hiện tại không
+
         if order.vendor != vendor:
-            messages.error(request, _("Bạn không có quyền xem đơn hàng này."))
+            messages.error(request, _("You don't have permission to view this order."))
             return redirect("useradmin:orders")
-        
+
         order_items = CartOrderProducts.objects.filter(order=order)
-        
+
         context = {
             'order': order,
             'order_items': order_items,
@@ -336,104 +275,91 @@ def order_detail(request, id):
             ]
         }
         return render(request, "useradmin/order_detail.html", context)
-    
+
     except CartOrder.DoesNotExist:
-        messages.error(request, _("Không tìm thấy đơn hàng."))
+        messages.error(request, _("Order not found."))
         return redirect("useradmin:orders")
 
 @login_required
+@vendor_auth_required()
 @csrf_exempt
-def change_order_status(request, oid):
-    # Kiểm tra người dùng có vendor chưa
-    try:
-        vendor = Vendor.objects.get(user=request.user)
-    except Vendor.DoesNotExist:
-        messages.warning(request, _("Bạn cần tạo hồ sơ vendor trước."))
-        return redirect("useradmin:dashboard")
-    
+def change_order_status(request, oid, vendor):
     try:
         order = CartOrder.objects.get(id=oid)
-        
-        # Kiểm tra đơn hàng có thuộc về vendor hiện tại không
+
         if order.vendor != vendor:
-            messages.error(request, _("Bạn không có quyền thay đổi trạng thái đơn hàng này."))
+            messages.error(request, _("You don't have permission to change this order status."))
             return redirect("useradmin:orders")
-        
+
         if request.method == "POST":
             new_status = request.POST.get("status")
             current_status = order.order_status
-            
+
             status_order = {
                 'pending': 1,
                 'processing': 2,
                 'shipped': 3,
                 'delivered': 4
             }
-            
+
             if current_status == 'delivered' and new_status != 'delivered':
                 messages.error(
                     request, 
-                    _("Không thể thay đổi trạng thái đơn hàng đã giao. Vui lòng tạo yêu cầu hoàn trả/đổi hàng.")
+                    _("Cannot change status of delivered order. Please create a return/exchange request.")
                 )
             elif status_order.get(current_status, 0) > status_order.get(new_status, 0):
                 messages.error(
                     request, 
-                    _("Không thể thay đổi trạng thái đơn hàng từ '{}' thành '{}'. Chỉ cho phép tiến trình tiến tới.").format(
+                    _("Cannot change order status from '{}' to '{}'. Only forward progression is allowed.").format(
                         current_status, new_status
                     )
                 )
             else:
                 order.order_status = new_status
                 order.save()
-                messages.success(request, _("Trạng thái đơn hàng đã được thay đổi từ '{}' thành '{}'").format(
+                messages.success(request, _("Order status changed from '{}' to '{}'").format(
                     current_status, new_status
                 ))
-        
+
         return redirect("useradmin:order_detail", order.id)
     except CartOrder.DoesNotExist:
-        messages.error(request, _("Không tìm thấy đơn hàng."))
+        messages.error(request, _("Order not found."))
         return redirect("useradmin:orders")
 
 @login_required
 def shop_page(request):
-    # Kiểm tra người dùng có vendor chưa
     try:
         vendor = Vendor.objects.get(user=request.user)
         has_vendor = True
-        
-        # Lấy ảnh vendor
+
         try:
             vendor_image = Image.objects.get(
-                object_type='vendor', 
+                object_type='vendor',
                 object_id=vendor.vid,
                 is_primary=True
             )
             vendor_image_url = vendor_image.image.url
         except Image.DoesNotExist:
             vendor_image_url = None
-        
-        # Lấy sản phẩm của vendor
+
         products = Product.objects.filter(vendor=vendor)
-        
-        # Lấy thông tin doanh thu
+
         revenue = CartOrder.objects.filter(
             vendor=vendor,
             paid_status=True
         ).aggregate(price=Sum(AMOUNT))
-        
-        # Lấy thông tin số lượng bán
+
         total_sales = CartOrderProducts.objects.filter(
             order__vendor=vendor,
             order__paid_status=True
         ).aggregate(qty=Sum("qty"))
-        
-        # Lấy đánh giá của shop
+
         vendor_ratings = ProductReview.objects.filter(
             product__vendor=vendor
         ).aggregate(
             avg_rating=Coalesce(Avg('rating'), Value(0.0))
         )
-        
+
     except Vendor.DoesNotExist:
         vendor = None
         has_vendor = False
@@ -442,7 +368,7 @@ def shop_page(request):
         revenue = {'price': 0}
         total_sales = {'qty': 0}
         vendor_ratings = {'avg_rating': 0}
-        
+
     context = {
         'vendor': vendor,
         'vendor_image_url': vendor_image_url,
@@ -452,24 +378,15 @@ def shop_page(request):
         'vendor_ratings': vendor_ratings,
         'has_vendor': has_vendor,
     }
-    
+
     return render(request, "useradmin/shop_page.html", context)
 
 @login_required
-def reviews(request):
-    # Kiểm tra người dùng có vendor chưa
-    try:
-        vendor = Vendor.objects.get(user=request.user)
-    except Vendor.DoesNotExist:
-        messages.warning(request, _("Bạn cần tạo hồ sơ vendor trước."))
-        return redirect("useradmin:dashboard")
-    
-    # Lấy danh sách sản phẩm của vendor hiện tại
+@vendor_auth_required()
+def reviews(request, vendor):
     vendor_products = Product.objects.filter(vendor=vendor).values_list('pid', flat=True)
-    
-    # Lấy đánh giá cho các sản phẩm của vendor
     reviews = ProductReview.objects.filter(product__pid__in=vendor_products)
-    
+
     context = {
         'reviews': reviews,
         'vendor': vendor,
@@ -477,22 +394,16 @@ def reviews(request):
     return render(request, "useradmin/reviews.html", context)
 
 @login_required
+@vendor_required(redirect_url="core:index")
 def create_vendor(request):
-    # Kiểm tra role
-    if request.user.role != "vendor":
-        messages.error(request, _("Bạn cần có role vendor để tạo shop."))
-        return redirect('core:index')
-    
-    # Kiểm tra người dùng đã có vendor chưa
     try:
         vendor = Vendor.objects.get(user=request.user)
-        messages.info(request, _("Bạn đã có tài khoản vendor"))
+        messages.info(request, _("You already have a vendor account"))
         return redirect('useradmin:dashboard')
     except Vendor.DoesNotExist:
         pass
-    
+
     if request.method == 'POST':
-        # Xử lý form tạo vendor
         title = request.POST.get('title')
         description = request.POST.get('description')
         address = request.POST.get('address')
@@ -502,12 +413,11 @@ def create_vendor(request):
         authentic_rating = float(request.POST.get('authentic_rating', 5.0))
         days_return = int(request.POST.get('days_return', 7))
         warranty_period = int(request.POST.get('warranty_period', 12))
-        
-        # Tạo vendor mới
+
         with transaction.atomic():
             import shortuuid
             vid = f"v-{shortuuid.uuid()[:10]}"
-            
+
             vendor = Vendor.objects.create(
                 vid=vid,
                 title=title,
@@ -521,8 +431,7 @@ def create_vendor(request):
                 warranty_period=warranty_period,
                 user=request.user
             )
-            
-            # Xử lý upload hình ảnh nếu có
+
             if 'image' in request.FILES:
                 Image.objects.create(
                     image=request.FILES['image'],
@@ -532,7 +441,195 @@ def create_vendor(request):
                     is_primary=True
                 )
         
-        messages.success(request, _("Tài khoản vendor của bạn đã được tạo thành công"))
+        messages.success(request, _("Your vendor account has been created successfully"))
         return redirect('useradmin:dashboard')
-    
+
     return render(request, 'useradmin/create_vendor.html')
+
+@login_required
+@vendor_auth_required()
+def coupons(request, vendor):
+    search_query = request.GET.get('search', '').strip()
+    status_filter = request.GET.get('status', '')
+    show_deleted = request.GET.get('show_deleted', 'false') == 'true'
+    
+    if show_deleted:
+        coupons_list = Coupon.objects.filter(vendor=vendor)
+    else:
+        coupons_list = Coupon.objects.filter(vendor=vendor).annotate(
+            usage_count=Count('couponuser'),
+            orders_count=Count('cart_orders')
+        ).exclude(
+            Q(active=False) & Q(orders_count__gt=0)
+        )
+    
+    if not show_deleted:
+        pass
+    else:
+        coupons_list = coupons_list.annotate(
+            usage_count=Count('couponuser'),
+            orders_count=Count('cart_orders')
+        )
+    
+    if search_query:
+        coupons_list = coupons_list.filter(
+            Q(code__icontains=search_query) |
+            Q(min_order_amount__icontains=search_query)
+        )
+    
+    current_time = timezone.now()
+    if status_filter == 'active':
+        coupons_list = coupons_list.filter(active=True, expiry_date__gt=current_time)
+    elif status_filter == 'inactive':
+        coupons_list = coupons_list.filter(active=False)
+    elif status_filter == 'expired':
+        coupons_list = coupons_list.filter(expiry_date__lte=current_time)
+    elif status_filter == 'deleted' and show_deleted:
+        coupons_list = coupons_list.filter(active=False, orders_count__gt=0)
+    
+    coupons_list = coupons_list.order_by('-id')
+    
+    paginator = Paginator(coupons_list, 15)
+    page = request.GET.get('page')
+    coupons = paginator.get_page(page)
+    
+    context = {
+        'coupons': coupons,
+        'vendor': vendor,
+        'search_query': search_query,
+        'status_filter': status_filter,
+        'show_deleted': show_deleted,
+        'today': current_time,
+    }
+    return render(request, "useradmin/coupons.html", context)
+
+@login_required
+@vendor_auth_required()
+def add_coupon(request, vendor):
+    if request.method == 'POST':
+        form = CouponForm(request.POST)
+        if form.is_valid():
+            coupon = form.save(commit=False)
+            coupon.vendor = vendor
+            coupon.code = coupon.code.upper().strip()
+            coupon.save()
+            
+            messages.success(request, _("Coupon '{}' has been created successfully!").format(coupon.code))
+            return redirect('useradmin:coupons')
+    else:
+        form = CouponForm()
+    
+    context = {
+        'form': form,
+        'vendor': vendor,
+        'action': 'add',
+        'title': _('Create New Coupon')
+    }
+    return render(request, "useradmin/add_coupon.html", context)
+
+@login_required
+@vendor_auth_required()
+def edit_coupon(request, vendor, coupon_id):
+    coupon = get_object_or_404(Coupon, id=coupon_id, vendor=vendor)
+    
+    if request.method == 'POST':
+        form = CouponForm(request.POST, instance=coupon)
+        if form.is_valid():
+            coupon = form.save(commit=False)
+            coupon.code = coupon.code.upper().strip()
+            coupon.save()
+            
+            messages.success(request, _("Coupon '{}' has been updated!").format(coupon.code))
+            return redirect('useradmin:coupons')
+    else:
+        form = CouponForm(instance=coupon)
+    
+    context = {
+        'form': form,
+        'coupon': coupon,
+        'vendor': vendor,
+        'action': 'edit',
+        'title': _('Edit Coupon: {}').format(coupon.code)
+    }
+    return render(request, "useradmin/add_coupon.html", context)
+
+@login_required
+@vendor_auth_required()
+def delete_coupon(request, vendor, coupon_id):
+    if not request.headers.get('x-requested-with') == 'XMLHttpRequest':
+        return JsonResponse({'success': False, 'error': 'AJAX request required'}, status=400)
+    
+    coupon = get_object_or_404(Coupon, id=coupon_id, vendor=vendor)
+    
+    orders_with_coupon = CartOrder.objects.filter(coupon=coupon).exists()
+    
+    if request.method == 'POST':
+        try:
+            coupon_code = coupon.code
+            
+            if orders_with_coupon:
+                error_message = _("Cannot delete coupon '{}' because it has been used in orders. Please deactivate it instead.").format(coupon_code)
+                return JsonResponse({
+                    'success': False, 
+                    'error': error_message,
+                    'used_in_orders': True
+                }, status=400)
+            else:
+                coupon.delete()
+                message = _("Coupon '{}' has been deleted successfully!").format(coupon_code)
+                return JsonResponse({
+                    'success': True, 
+                    'message': message,
+                    'coupon_id': coupon_id,
+                    'deleted': True
+                })
+            
+        except Exception as e:
+            error_message = _("An error occurred while deleting the coupon: {}").format(str(e))
+            return JsonResponse({
+                'success': False, 
+                'error': error_message
+            }, status=500)
+    
+    return JsonResponse({
+        'coupon': {
+            'id': coupon.id,
+            'code': coupon.code,
+            'discount': coupon.discount,
+            'expiry_date': coupon.expiry_date.strftime('%d %b %Y %H:%M') if coupon.expiry_date else '',
+            'active': coupon.active,
+            'used_in_orders': orders_with_coupon
+        }
+    })
+
+@login_required
+@vendor_auth_required()
+def coupon_detail(request, vendor, coupon_id):
+    coupon = get_object_or_404(Coupon, id=coupon_id, vendor=vendor)
+    
+    coupon_users = CouponUser.objects.filter(coupon=coupon).select_related('user')
+    
+    total_usage = coupon_users.count()
+    is_expired = coupon.expiry_date <= timezone.now()
+    
+    context = {
+        'coupon': coupon,
+        'coupon_users': coupon_users,
+        'total_usage': total_usage,
+        'is_expired': is_expired,
+        'vendor': vendor,
+    }
+    return render(request, "useradmin/coupon_detail.html", context)
+
+@login_required
+@vendor_auth_required()
+def toggle_coupon_status(request, vendor, coupon_id):
+    coupon = get_object_or_404(Coupon, id=coupon_id, vendor=vendor)
+    
+    coupon.active = not coupon.active
+    coupon.save()
+    
+    status = _("activated") if coupon.active else _("deactivated")
+    messages.success(request, _("Coupon '{}' has been {}!").format(coupon.code, status))
+    
+    return redirect('useradmin:coupons')

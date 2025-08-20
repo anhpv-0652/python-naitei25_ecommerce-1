@@ -48,10 +48,10 @@ $(document).ready(function () {
 
     // Coupon form handling
     $('.apply-coupon').on('submit', function (e) {
-        var code = $('input[name="code"]', this).val().trim();
-        if (!code) {
-            e.preventDefault();
-            alert(typeof COUPON_EMPTY_MSG !== 'undefined' ? COUPON_EMPTY_MSG : 'Please enter a coupon code.');
-        }
-        });
+      var code = $('input[name="code"]', this).val().trim();
+      if (!code) {
+        e.preventDefault();
+        alert(typeof COUPON_EMPTY_MSG !== 'undefined' ? COUPON_EMPTY_MSG : 'Please enter a coupon code.');
+      }
+    });
 });
