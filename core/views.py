@@ -413,8 +413,7 @@ def checkout(request, oid):
           discount = subtotal * Decimal(str(coupon.discount)) / Decimal('100')
           if discount > coupon.max_discount_amount:
               discount = coupon.max_discount_amount
-          subtotal = subtotal - discount + tax + shipping
-          total = subtotal
+          total = subtotal - discount + tax + shipping
           order.amount = total
           order.save()
     host = request.get_host()
@@ -744,7 +743,7 @@ def build_products_qs(request):
 def product_list_view(request):
     # dữ liệu cho sidebar/filter
     tags = Tag.objects.all().order_by("-id")[:TAG_LIMIT]
-    categories_all = Category.objects.all()
+    categories_all = Category.objects.all().order_by("title")
     vendors_all = Vendor.objects.all()
     min_max_price = Product.objects.aggregate(Min("amount"), Max("amount"))
 

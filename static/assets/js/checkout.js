@@ -48,19 +48,10 @@ $(document).ready(function () {
 
     // Coupon form handling
     $('.apply-coupon').on('submit', function (e) {
-        e.preventDefault();
-        var code = $('input[name="code"]').val();
-
-        if (code) {
-            if (code.toLowerCase() === 'save10') {
-                alert(COUPON_SUCCESS_MSG);
-                $('.cart-totals p:contains("Discount")').next().text('-$20.00');
-                $('.cart-totals .text-primary').text('$310.21');
-            } else {
-                alert(COUPON_INVALID_MSG);
-            }
-        } else {
-            alert(COUPON_EMPTY_MSG);
+        var code = $('input[name="code"]', this).val().trim();
+        if (!code) {
+            e.preventDefault();
+            alert(typeof COUPON_EMPTY_MSG !== 'undefined' ? COUPON_EMPTY_MSG : 'Please enter a coupon code.');
         }
-    });
+        });
 });
