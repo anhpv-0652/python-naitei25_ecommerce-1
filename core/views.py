@@ -33,6 +33,7 @@ from django.db.models.functions import ExtractMonth
 from userauths.models import *
 from django.urls import reverse
 from paypal.standard.forms import PayPalPaymentsForm
+import calendar
 
 
 def index(request):
