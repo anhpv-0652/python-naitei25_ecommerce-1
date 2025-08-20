@@ -10,7 +10,6 @@ from django.utils.encoding import force_bytes
 from django.contrib.auth.tokens import default_token_generator
 from django.utils.http import urlsafe_base64_decode
 from userauths.models import User,Profile
-
 from django.core.mail import BadHeaderError
 import logging
 
@@ -21,12 +20,12 @@ def register_view(request):
         logout(request)
         messages.info(request, _("Bạn đã được đăng xuất để đăng ký tài khoản mới."))
         return redirect('userauths:sign-up')
-    
+
     if request.method == "POST":
         form = UserRegisterForm(request.POST or None)
         if form.is_valid():
             email = form.cleaned_data.get("email")
-            
+
             if not is_valid_email(email):
                 messages.error(request, _("Email không hợp lệ hoặc không tồn tại."))
                 return redirect('userauths:sign-up')
@@ -34,7 +33,7 @@ def register_view(request):
             new_user.is_active = False
             new_user.save()
             username = form.cleaned_data.get("username")
-            
+
             #Tao token va uidb64
             uidb64 = urlsafe_base64_encode(force_bytes(new_user.pk))
             token = default_token_generator.make_token(new_user)
@@ -53,7 +52,8 @@ def register_view(request):
                 "username": username,
                 "email": email
             }
-            return render(request, "userauths/activation_pending.html", context)  
+            return render(request, "userauths/activation_pending.html", context)
+
     else:
         form = UserRegisterForm()
     return render(request, "userauths/sign-up.html", {"form": form})
@@ -114,8 +114,6 @@ def profile_update(request):
 
     return render(request, "userauths/profile-edit.html", context)
 
-        
-        
 def activate_account(request, uidb64, token):
     try:
         uid = urlsafe_base64_decode(uidb64).decode()
@@ -131,4 +129,3 @@ def activate_account(request, uidb64, token):
     else:
         messages.error(request, "Liên kết kích hoạt không hợp lệ hoặc đã hết hạn.")
         return redirect("core:index")
-    

@@ -1,4 +1,4 @@
-from django.shortcuts import render
+
 from django.http import HttpResponse
 from django.contrib import messages
 from django.shortcuts import redirect
@@ -7,6 +7,7 @@ from .models import Product
 from django.template.loader import render_to_string
 from django.db.models import Avg, Count
 from core.models import ProductReview
+from django.db.models import Avg
 from django.shortcuts import get_object_or_404
 from core.models import *
 from core.models import Image
@@ -20,13 +21,19 @@ from core.models import Coupon, Product, Category, Vendor, CartOrder, CartOrderP
 from taggit.models import Tag
 from core.constants import *
 from django.contrib.auth.decorators import login_required
-from decimal import Decimal
-from django.shortcuts import render
+from decimal import Decimal, ROUND_HALF_UP
 from .models import Product, Image
 from core.forms import ProductReviewForm
 from django.utils import timezone
 from django.utils.translation import gettext as _
 from django.db import transaction
+from django.templatetags.static import static
+from django.urls import reverse
+from django.conf import settings
+from django.views.decorators.csrf import csrf_exempt
+from paypal.standard.forms import PayPalPaymentsForm
+from django.views.decorators.http import require_POST
+from django.shortcuts import render, redirect, get_object_or_404
 from django.views.decorators.http import require_POST, require_GET, require_http_methods
 from django.db.models import Min, Max
 from django.db.models.functions import ExtractMonth
@@ -404,7 +411,8 @@ def checkout(request, oid):
           discount = subtotal * Decimal(str(coupon.discount)) / Decimal('100')
           if discount > coupon.max_discount_amount:
               discount = coupon.max_discount_amount
-          total = subtotal - discount + tax + shipping
+          subtotal = subtotal - discount + tax + shipping
+          total = subtotal
           order.amount = total
           order.save()
     host = request.get_host()
@@ -521,7 +529,6 @@ def product_detail_view(request, pid):
     for r in reviews:
         width = r.rating * 20
         reviews_with_width.append((r, width))
-
     # average review
     average_rating = ProductReview.objects.filter(product=product).aggregate(rating=Avg('rating'))
     rating_counts = get_rating_counts(product)
@@ -794,7 +801,6 @@ def filter_product(request):
         "has_next": page_obj.has_next(),
         "next_page": page_obj.next_page_number() if page_obj.has_next() else None,
     })
-
 
 @require_POST
 @login_required
